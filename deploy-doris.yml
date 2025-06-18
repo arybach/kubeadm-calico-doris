@@ -1,0 +1,66 @@
+- name: Deploy Apache Doris
+  hosts: localhost
+  gather_facts: no
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    doris_ns: doris
+    gitea_domain: 192.168.56.240.nip.io
+    kubeconfig_path: /home/groot/.kube/config
+    
+  tasks:
+
+    - name: Add Doris Helm repository
+      shell: helm repo add selectdb https://charts.selectdb.com
+
+    - name: Update Helm repositories
+      shell: helm repo update selectdb
+
+    - name: Install Doris Operator via Helm
+      shell: |
+        helm install operator selectdb/doris-operator \
+          --namespace "{{ doris_ns }}"
+      register: doris_install
+      failed_when: "'STATUS: deployed' not in doris_install.stdout"
+
+    - name: Patch Doris Operator
+      shell: |
+        kubectl -n doris patch deployment doris-operator \
+          --type='json' \
+          -p='[{"op": "add", "path": "/spec/template/spec/nodeSelector", "value": {"kubernetes.io/hostname": "worker1"}}]'
+
+    - name: Allow all ingress/egress in Doris namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: allow-all
+            namespace: "{{ doris_ns }}"
+          spec:
+            podSelector: {}
+            ingress:
+              - {}
+            egress:
+              - {}
+            policyTypes:
+              - Ingress
+              - Egress
+
+    - name: Wait for Doris Operator pod to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ doris_ns }}"
+        label_selectors:
+          - app.kubernetes.io/instance=doris-operator
+          - app.kubernetes.io/name=deployment
+      register: doris_operator_pods
+      until: doris_operator_pods.resources | selectattr('status.phase','equalto','Running') | list | length > 0
+      retries: 10
+      delay: 15
+
+    - name: Apply Doris Cluster definition (CR + ConfigMaps)
+      shell: |
+        kubectl apply -f doris.yml -n doris
+    

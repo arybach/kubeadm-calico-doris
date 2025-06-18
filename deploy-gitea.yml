@@ -1,0 +1,214 @@
+- name: Deploy Gitea with Helm (Bitnami)
+  hosts: localhost
+  gather_facts: no
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars_files:
+    - ./config_vars.yml
+  vars:
+    gitea_ns: gitea
+    gitea_release: gitea
+    gitea_chart: bitnami/gitea
+    gitea_chart_version: 3.1.13
+    nginx_ns: nginx
+    doris_ns: doris
+    gitea_domain: "{{ METALLB_START | string ~ '.nip.io' }}"
+    kubeconfig_path: "{{ lookup('env', 'HOME') + '/.kube/config' }}"
+    # modify to match your bucket name, s3 region and the endpoint
+    s3_bucket: doris-gitea
+    s3_region: ap-southeast-1
+    s3_endpoint: https://s3.ap-southeast-1.amazonaws.com
+  tasks:
+    - name: Ensure gitea namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ gitea_ns }}"
+        state: present
+
+    - name: Ensure nginx namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ nginx_ns }}"
+        state: present
+
+    - name: Template Gitea Helm values
+      template:
+        src: gitea-values.yml.j2
+        dest: ./gitea-values.yml
+
+    - name: Add Bitnami Helm repository
+      shell: helm repo add bitnami https://charts.bitnami.com/bitnami
+      ignore_errors: yes
+
+    - name: Update Helm repositories
+      shell: helm repo update
+      ignore_errors: yes
+
+    - name: Deploy NGINX Ingress Controller (Bitnami)
+      shell: >
+        helm upgrade --install ingress-nginx bitnami/nginx-ingress-controller \
+          --namespace {{ nginx_ns }} \
+          --set service.type=LoadBalancer \
+          --set controller.config.proxy-body-size=12G \
+          --set controller.extraArgs.default-ssl-certificate=gitea/{{ gitea_domain }}-tls \
+          --atomic --wait
+
+    - name: Patch NGINX NetworkPolicy to allow traffic on ports 80 and 443
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: ingress-nginx-nginx-ingress-controller
+            namespace: nginx
+          spec:
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/component: controller
+                app.kubernetes.io/instance: ingress-nginx
+                app.kubernetes.io/name: nginx-ingress-controller
+            policyTypes:
+              - Ingress
+              - Egress
+            ingress:
+              - ports:
+                  - port: 80
+                    protocol: TCP
+                  - port: 443
+                    protocol: TCP
+                  - port: 8080
+                    protocol: TCP
+                  - port: 8443
+                    protocol: TCP
+                from:
+                  - ipBlock:
+                      cidr: 0.0.0.0/0
+            egress:
+              - {}
+
+    - name: Create Gitea S3 secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: gitea-s3-secret
+            namespace: "{{ gitea_ns }}"
+          stringData:
+            AWS_ACCESS_KEY_ID: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+            AWS_SECRET_ACCESS_KEY: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+            S3_BUCKET: "{{ s3_bucket }}"
+            S3_REGION: "{{ s3_region }}"
+            S3_ENDPOINT: "{{ s3_endpoint }}"
+
+    - name: Create PostgreSQL password secret for Gitea
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: gitea-postgres-secret
+            namespace: "{{ gitea_ns }}"
+          stringData:
+            # move to env variables or use secrets
+            postgres-password: "{{ postgres_password }}"
+            username: "{{ postgres_user }}"
+            password: "{{ postgres_password }}"
+
+    - name: Create Gitea admin secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: gitea
+            namespace: "{{ gitea_ns }}"
+          stringData:
+            admin-username: "{{ gitea_admin_user }}"
+            admin-password: "{{ gitea_admin_password }}"
+
+    # this override default helm chart-created gitea network policy. You can do better. 
+    - name: Apply consolidated Gitea network policy
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: gitea-nip
+            namespace: "{{ gitea_ns }}"
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+              - Egress
+            ingress:
+              - from:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: nginx
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: doris
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: metallb-system
+                  - ipBlock:
+                      cidr: 0.0.0.0/0
+                ports:
+                # add ports if needed
+                  - port: 3000
+                    protocol: TCP
+                  - port: 2222
+                    protocol: TCP
+            egress:
+              - to:
+                  - ipBlock:
+                      cidr: 0.0.0.0/0
+                ports:
+                  - protocol: UDP
+                    port: 53
+                  - protocol: TCP
+                    port: 53
+                  - protocol: TCP
+                    port: 443
+                  - protocol: TCP
+                    port: 80
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: nginx
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: metallb-system
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: doris
+              - to:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: kube-system
+                ports:
+                  - protocol: UDP
+                    port: 53
+                  - protocol: TCP
+                    port: 53
+
+    - name: Add PVCs
+      shell: kubectl apply -f pvc.yml
+
+    - name: Deploy Gitea Helm chart
+      shell: >
+        helm upgrade --install {{ gitea_release }} {{ gitea_chart }} \
+          --namespace {{ gitea_ns }} \
+          --version {{ gitea_chart_version }} \
+          -f gitea-values.yml \
+          --timeout 10m0s

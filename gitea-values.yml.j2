@@ -1,0 +1,119 @@
+adminUsername: gitea_admin
+existingSecret: gitea
+extraEnvVarsSecret: gitea-s3-secret
+rootURL: https://{{ gitea_domain }}/
+# rootURL: https://gitea.doris.domain
+nodeSelector:
+  kubernetes.io/hostname: worker1
+
+image:
+  debug: true
+
+persistence:
+  enabled: true
+  storageClass: gitea-local
+  # storageClass: do-block-storage
+  size: 20Gi
+
+postgresql:
+  enabled: true
+  volumePermissions:
+    enabled: true
+  auth:
+    existingSecret: gitea-postgres-secret
+    username: postgres
+    database: gitea
+  primary:
+    persistence:
+      enabled: true
+      storageClass: postgres-local
+      size: 8Gi
+    nodeSelector:
+      kubernetes.io/hostname: master
+
+volumePermissions:
+  enabled: true
+
+networkPolicy:
+  enabled: true
+  allowExternal: true
+  allowExternalEgress: true
+  allowDNS: true
+  allowKubeDNS: true
+  allowIngress: true
+
+gitea:
+  config:
+    packages:
+      ENABLED: true
+    packages.container:
+      ENABLED: true
+    server:
+      # DOMAIN: gitea.doris.domain
+      # PROTOCOL: https
+      # ROOT_URL: https://gitea.doris.domain/
+      DOMAIN: {{ gitea_domain }}
+      PROTOCOL: https
+      ROOT_URL: https://{{ gitea_domain }}/
+      HTTP_PORT: 3000
+      CERT_FILE: /certs/tls.crt
+      KEY_FILE: /certs/tls.key
+    lfs:
+      STORAGE_TYPE: minio
+      MINIO_ENDPOINT: ${S3_ENDPOINT}
+      MINIO_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      MINIO_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      MINIO_BUCKET: ${S3_BUCKET}
+      MINIO_LOCATION: ${S3_REGION}
+      MINIO_USE_SSL: true
+
+extraVolumes:
+  - name: gitea-tls
+    secret:
+      secretName: {{ gitea_domain }}-tls
+
+extraVolumeMounts:
+  - name: gitea-tls
+    mountPath: /certs
+    readOnly: true
+
+## gitea.doris.domain-tls
+# extraVolumes:
+#   - name: gitea-tls
+#     secret:
+#       # secretName: gitea-tls
+#       secretName: gitea.doris.domain-tls
+
+# extraVolumeMounts:
+#   - name: gitea-tls
+#     mountPath: /certs
+#     readOnly: true
+
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  hostname: {{ gitea_domain }}
+  tls: true
+  tlsSecretName: {{ gitea_domain }}-tls
+  certManager: false
+  annotations:
+    # cert-manager.io/issuer: gitea-issuer
+    cert-manager.io/issuer: gitea-selfsigned
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10G"
+  hosts:
+    # - name: gitea.doris.domain
+    - name: {{ gitea_domain }}
+      path: /
+      pathType: ImplementationSpecific
+  # tlsSecretName: gitea.doris.domain-tls
+
+service:
+  type: ClusterIP
+  http:
+    port: 3000
+  https:
+    port: 443
+  ssh:
+    port: 22

@@ -1,0 +1,184 @@
+- name: Deploy cert-manager and ACME Issuer for Gitea (staging)
+  hosts: localhost
+  gather_facts: no
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  vars:
+    cert_manager_ns: cert-manager
+    gitea_ns: gitea
+    doris_ns: doris
+    gitea_domain: 192.168.56.240.nip.io
+    kubeconfig_path: /home/groot/.kube/config
+    cert_manager_chart: jetstack/cert-manager
+    cert_manager_version: v1.12.7
+
+  tasks:
+    - name: Ensure namespaces exist
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+        state: present
+      loop:
+        - "{{ cert_manager_ns }}"
+        - "{{ gitea_ns }}"
+        - "{{ doris_ns }}"
+
+    - name: Add Jetstack Helm repository
+      shell: helm repo add jetstack https://charts.jetstack.io
+      ignore_errors: yes
+
+    - name: Update Helm repositories
+      shell: helm repo update
+      ignore_errors: yes
+
+    - name: Install cert-manager CRDs
+      shell: kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.12.7/cert-manager.crds.yaml
+      retries: 3
+      delay: 10
+
+    - name: Delete cert-manager webhook TLS secrets to force regeneration
+      shell: |
+        kubectl delete secret cert-manager-webhook-ca -n {{ cert_manager_ns }} --ignore-not-found
+        kubectl delete secret cert-manager-webhook-tls -n {{ cert_manager_ns }} --ignore-not-found
+      ignore_errors: yes
+
+    - name: Deploy cert-manager
+      shell: >
+        helm upgrade --install cert-manager {{ cert_manager_chart }}
+        --namespace {{ cert_manager_ns }}
+        --version {{ cert_manager_version }}
+        --set installCRDs=false
+        --set webhook.hostNetwork=true
+        --set webhook.dnsPolicy=ClusterFirst
+        --set webhook.tolerations[0].operator=Exists
+        --set webhook.securePort=10260
+        --timeout 600s
+        --wait
+      retries: 3
+      delay: 20
+
+    - name: Restart cert-manager webhook pod
+      shell: kubectl delete pod -l app=webhook -n {{ cert_manager_ns }}
+
+    - name: Allow all ingress/egress in cert-manager namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: allow-all
+            namespace: cert-manager
+          spec:
+            podSelector: {}
+            ingress:
+              - {}
+            egress:
+              - {}
+            policyTypes:
+              - Ingress
+              - Egress
+
+    - name: Wait for cert-manager webhook TLS secret to be recreated
+      shell: |
+        until kubectl get secret cert-manager-webhook-ca -n {{ cert_manager_ns }}; do
+          sleep 10
+        done
+      retries: 10
+      delay: 3
+
+    - name: Allow all ingress/egress in Gitea namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: allow-all
+            namespace: "{{ gitea_ns }}"
+          spec:
+            podSelector: {}
+            ingress:
+              - {}
+            egress:
+              - {}
+            policyTypes:
+              - Ingress
+              - Egress
+
+    - name: Apply Gitea ACME Staging Issuer
+      kubernetes.core.k8s:
+        state: present
+        src: issuer.yml
+        namespace: "{{ gitea_ns }}"
+      retries: 5
+      delay: 60
+      register: issuer_result
+      until: issuer_result is succeeded
+
+    - name: Create Gitea TLS Certificate manually
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: "{{ gitea_domain }}-tls"
+            namespace: "{{ gitea_ns }}"
+          spec:
+            secretName: "{{ gitea_domain }}-tls"
+            issuerRef:
+              name: gitea-selfsigned
+              kind: ClusterIssuer
+            dnsNames:
+              - "{{ gitea_domain }}"
+
+    - name: Create doris TLS Certificate manually
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: "doris.{{ gitea_domain }}-tls"
+            namespace: "{{ doris_ns}}"
+          spec:
+            secretName: "doris.{{ gitea_domain }}-tls"
+            issuerRef:
+              name: gitea-selfsigned
+              kind: ClusterIssuer
+            dnsNames:
+              - "doris.{{ gitea_domain}}"
+
+    - name: Deploy MetalLB (native manifests)
+      shell: |
+        kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.15.2/config/manifests/metallb-native.yaml
+
+    - name: Wait for MetalLB controller to be ready
+      shell: |
+        kubectl wait --namespace metallb-system --for=condition=ready pod --selector=component=controller --timeout=120s
+        kubectl wait --namespace metallb-system --for=condition=ready pod --selector=component=speaker --timeout=120s
+
+    - name: Configure MetalLB IP address pool
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: default-pool
+            namespace: metallb-system
+          spec:
+            addresses:
+              - 192.168.56.240-192.168.56.250
+
+    - name: Configure MetalLB L2 advertisement
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: l2
+            namespace: metallb-system

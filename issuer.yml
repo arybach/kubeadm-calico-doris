@@ -1,0 +1,75 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: gitea-selfsigned
+  # namespace is needed only for the kind: Issuer
+  # namespace: gitea
+spec:
+  selfSigned: {}
+# ---
+# apiVersion: cert-manager.io/v1
+# kind: Issuer
+# metadata:
+#   name: gitea-issuer
+#   namespace: gitea
+# spec:
+#   acme:
+#     server: https://acme-staging-v02.api.letsencrypt.org/directory  # Staging for now
+#     email: mats.tumblebuns@gmail.com
+#     privateKeySecretRef:
+#       name: gitea-acme-key
+#     solvers:
+#       - http01:
+#           ingress:
+#             class: nginx
+
+# ---
+# apiVersion: cert-manager.io/v1
+# kind: Issuer
+# metadata:
+#   name: gitea-issuer
+#   namespace: gitea
+# spec:
+#   acme:
+#     server: https://acme-staging-v02.api.letsencrypt.org/directory  # Staging server
+#     email: mats.tumblebuns@gmail.com
+#     privateKeySecretRef:
+#       name: gitea-acme-key
+#     solvers:
+#     - dns01:
+#         digitalocean:
+#           tokenSecretRef:
+#             name: lets-encrypt-do-dns
+#             key: access-token
+#       selector:
+#         dnsNames:
+#           - "10.1.0.8.nip.io"
+#           # - "gitea.webapp.domain"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-role
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "update", "watch", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "certificaterequests", "orders", "challenges"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["acme.cert-manager.io"]
+    resources: ["orders", "challenges"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: cert-manager
+    namespace: cert-manager

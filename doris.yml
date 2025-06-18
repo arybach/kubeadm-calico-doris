@@ -1,0 +1,107 @@
+apiVersion: doris.selectdb.com/v1
+kind: DorisCluster
+metadata:
+  name: doris-cluster
+  namespace: doris
+spec:
+  feSpec:
+    replicas: 1
+    image: apache/doris:fe-2.1.9
+    service:
+      type: ClusterIP
+    configMapInfo:
+      configMapName: doris-fe-config
+      resolveKey: fe.conf
+    limits:
+      cpu: 4
+      memory: 10Gi
+    requests:
+      cpu: 3
+      memory: 8Gi
+    nodeSelector:
+      kubernetes.io/hostname: worker1
+
+  beSpec:
+    replicas: 1
+    image: apache/doris:be-2.1.9
+    configMapInfo:
+      configMapName: doris-be-config
+      resolveKey: be.conf
+    limits:
+      cpu: 4
+      memory: 16Gi
+    requests:
+      cpu: 3
+      memory: 12Gi
+    nodeSelector:
+      kubernetes.io/hostname: worker2
+
+  #   storageVolumes:
+  #     - name: doris-be-storage
+  #       mountPath: /opt/apache-doris/be/storage
+  #       storageClassName: doris-local
+  #       storageSize: 50Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-fe-config
+  namespace: doris
+data:
+  fe.conf: |
+    CUR_DATE=`date +%Y%m%d-%H%M%S`
+    LOG_DIR = ${DORIS_HOME}/log
+    JAVA_OPTS="-Djavax.security.auth.useSubjectCredsOnly=false -Xss4m -Xmx8192m -XX:+UseMembar -XX:SurvivorRatio=8 -XX:MaxTenuringThreshold=7 -XX:+PrintGCDateStamps -XX:+PrintGCDetails -XX:+UseConcMarkSweepGC -XX:+UseParNewGC -XX:+CMSClassUnloadingEnabled -XX:-CMSParallelRemarkEnabled -XX:CMSInitiatingOccupancyFraction=80 -XX:SoftRefLRUPolicyMSPerMB=0 -Xloggc:$DORIS_HOME/log/fe.gc.log.$CUR_DATE"
+    JAVA_OPTS_FOR_JDK_9="-Djavax.security.auth.useSubjectCredsOnly=false -Xss4m -Xmx8192m -XX:SurvivorRatio=8 -XX:MaxTenuringThreshold=7 -XX:+CMSClassUnloadingEnabled -XX:-CMSParallelRemarkEnabled -XX:CMSInitiatingOccupancyFraction=80 -XX:SoftRefLRUPolicyMSPerMB=0 -Xlog:gc*:$DORIS_HOME/log/fe.gc.log.$CUR_DATE:time"
+    sys_log_level = INFO
+    sys_log_mode = NORMAL
+    http_port = 8030
+    rpc_port = 9020
+    query_port = 9030
+    edit_log_port = 9010
+    enable_fqdn_mode = true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-be-config
+  namespace: doris
+data:
+  be.conf: |
+    CUR_DATE=`date +%Y%m%d-%H%M%S`
+    PPROF_TMPDIR="$DORIS_HOME/log/"
+    JAVA_OPTS="-Xmx1024m -DlogPath=$DORIS_HOME/log/jni.log -Xloggc:$DORIS_HOME/log/be.gc.log.$CUR_DATE -Djavax.security.auth.useSubjectCredsOnly=false -Dsun.java.command=DorisBE -XX:-CriticalJNINatives -DJDBC_MIN_POOL=1 -DJDBC_MAX_POOL=100 -DJDBC_MAX_IDLE_TIME=300000 -DJDBC_MAX_WAIT_TIME=5000"
+    JAVA_OPTS_FOR_JDK_9="-Xmx1024m -DlogPath=$DORIS_HOME/log/jni.log -Xlog:gc:$DORIS_HOME/log/be.gc.log.$CUR_DATE -Djavax.security.auth.useSubjectCredsOnly=false -Dsun.java.command=DorisBE -XX:-CriticalJNINatives -DJDBC_MIN_POOL=1 -DJDBC_MAX_POOL=100 -DJDBC_MAX_IDLE_TIME=300000 -DJDBC_MAX_WAIT_TIME=5000"
+    JEMALLOC_CONF="percpu_arena:percpu,background_thread:true,metadata_thp:auto,muzzy_decay_ms:15000,dirty_decay_ms:15000,oversize_threshold:0,lg_tcache_max:20,prof:false,lg_prof_interval:32,lg_prof_sample:19,prof_gdump:false,prof_accum:false,prof_leak:false,prof_final:false"
+    JEMALLOC_PROF_PRFIX=""
+    sys_log_level = INFO
+    be_port = 9060
+    webserver_port = 8040
+    heartbeat_service_port = 9050
+    brpc_port = 8060
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: doris
+  namespace: doris
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    cert-manager.io/issuer: gitea-selfsigned
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - doris.192.168.56.240.nip.io
+      secretName: doris.192.168.56.240.nip.io-tls
+  rules:
+    - host: doris.192.168.56.240.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: doris-cluster-fe-service
+                port:
+                  number: 8030  # Doris FE HTTP UI
