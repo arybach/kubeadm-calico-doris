@@ -1,0 +1,6 @@
+join-command.sh
+config_vars.yml
+*.crt
+gitea-values.yml
+.vagrant
+,vagrant/*
